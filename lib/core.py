@@ -8,9 +8,10 @@ knowledge removal and task-specific optimization.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from typing import Dict, List, Optional, Tuple, Callable, Any
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 
 logger = logging.getLogger(__name__)
@@ -22,18 +23,26 @@ class DistillationConfig:
     
     Attributes:
         temperature: Temperature for softening probability distributions
-        alpha: Weight for distillation loss (1-alpha for task loss)
-        pruning_rate: Rate at which to prune neurons/weights per iteration
-        specialization_threshold: Minimum importance score to retain knowledge
-        max_iterations: Maximum number of distillation iterations
-        task_weight_schedule: How to adjust task vs distillation weight over time
+        alpha_start: Initial weight for distillation loss (vs task loss)
+        alpha_end: Final weight for distillation loss
+        learning_rate: Learning rate for optimizer
+        num_epochs: Number of training epochs
+        pruning_start_epoch: Epoch to start pruning
+        pruning_end_epoch: Epoch to end pruning
+        target_sparsity: Target sparsity level (fraction of weights to prune)
+        importance_threshold: Threshold for importance-based pruning
+        prune_every: Prune every N epochs
     """
-    temperature: float = 3.0
-    alpha: float = 0.7
-    pruning_rate: float = 0.1
-    specialization_threshold: float = 0.3
-    max_iterations: int = 100
-    task_weight_schedule: str = "linear"  # 'linear', 'exponential', 'constant'
+    temperature: float = 4.0
+    alpha_start: float = 0.7
+    alpha_end: float = 0.3
+    learning_rate: float = 0.001
+    num_epochs: int = 20
+    pruning_start_epoch: int = 5
+    pruning_end_epoch: int = 15
+    target_sparsity: float = 0.5
+    importance_threshold: float = 0.1
+    prune_every: int = 3
 
 
 class KnowledgeDistiller:
@@ -59,15 +68,16 @@ class KnowledgeDistiller:
             config: Configuration for distillation process
             device: Device to run models on
         """
-        self.teacher = teacher_model.to(device)
-        self.student = student_model.to(device)
+        self.teacher_model = teacher_model.to(device)
+        self.student_model = student_model.to(device)
         self.config = config
         self.device = device
-        self.teacher.eval()  # Teacher is always in eval mode
+        self.teacher_model.eval()  # Teacher is always in eval mode
         
         # Track importance scores for knowledge components
         self.knowledge_importance: Dict[str, torch.Tensor] = {}
         self.iteration = 0
+        self.current_epoch = 0
         
     def distillation_loss(
         self,
@@ -96,9 +106,45 @@ class KnowledgeDistiller:
         
         return distill_loss
     
+    def get_alpha(self, epoch: int) -> float:
+        """Get the alpha value (distillation weight) for current epoch.
+        
+        Linearly interpolates from alpha_start to alpha_end over training.
+        
+        Args:
+            epoch: Current epoch number
+            
+        Returns:
+            Alpha value for balancing distillation and task loss
+        """
+        progress = min(1.0, epoch / max(1, self.config.num_epochs - 1))
+        alpha = self.config.alpha_start + (self.config.alpha_end - self.config.alpha_start) * progress
+        return alpha
+    
+    def get_pruning_rate(self, epoch: int) -> float:
+        """Get the pruning rate for current epoch.
+        
+        Gradually increases pruning during the pruning phase.
+        
+        Args:
+            epoch: Current epoch number
+            
+        Returns:
+            Pruning rate (fraction of weights to prune)
+        """
+        if epoch < self.config.pruning_start_epoch:
+            return 0.0
+        if epoch > self.config.pruning_end_epoch:
+            return self.config.target_sparsity
+            
+        pruning_progress = (epoch - self.config.pruning_start_epoch) / (
+            self.config.pruning_end_epoch - self.config.pruning_start_epoch
+        )
+        return self.config.target_sparsity * pruning_progress
+    
     def compute_knowledge_importance(
         self,
-        task_dataloader: torch.utils.data.DataLoader,
+        dataloader: DataLoader,
         num_batches: Optional[int] = None
     ) -> Dict[str, torch.Tensor]:
         """Compute importance scores for different knowledge components.
@@ -107,63 +153,64 @@ class KnowledgeDistiller:
         the model are most relevant for the target task.
         
         Args:
-            task_dataloader: DataLoader with task-specific data
+            dataloader: DataLoader with task-specific data
             num_batches: Number of batches to use (None for all)
             
         Returns:
             Dictionary mapping layer names to importance scores
         """
-        self.student.eval()
+        self.student_model.eval()
         importance_scores = {}
         
         # Initialize importance accumulators
-        for name, param in self.student.named_parameters():
+        for name, param in self.student_model.named_parameters():
             if param.requires_grad:
                 importance_scores[name] = torch.zeros_like(param.data)
         
         batches_processed = 0
-        for batch_idx, (inputs, targets) in enumerate(task_dataloader):
+        for batch_idx, (inputs, targets) in enumerate(dataloader):
             if num_batches and batch_idx >= num_batches:
                 break
                 
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
             
-            self.student.zero_grad()
-            outputs = self.student(inputs)
+            self.student_model.zero_grad()
+            outputs = self.student_model(inputs)
             
             # Compute loss and gradients
             loss = F.cross_entropy(outputs, targets)
             loss.backward()
             
             # Accumulate squared gradients as importance measure
-            for name, param in self.student.named_parameters():
+            for name, param in self.student_model.named_parameters():
                 if param.grad is not None:
                     importance_scores[name] += param.grad.data.abs()
             
             batches_processed += 1
         
         # Normalize importance scores
-        for name in importance_scores:
-            importance_scores[name] /= batches_processed
+        if batches_processed > 0:
+            for name in importance_scores:
+                importance_scores[name] /= batches_processed
             
         self.knowledge_importance = importance_scores
         return importance_scores
     
     def prune_irrelevant_knowledge(
         self,
-        pruning_rate: Optional[float] = None
+        pruning_rate: float
     ) -> int:
         """Prune weights with low importance scores.
         
         Args:
-            pruning_rate: Fraction of weights to prune (uses config if None)
+            pruning_rate: Fraction of weights to prune
             
         Returns:
             Number of parameters pruned
         """
-        if pruning_rate is None:
-            pruning_rate = self.config.pruning_rate
+        if pruning_rate <= 0:
+            return 0
             
         if not self.knowledge_importance:
             logger.warning("No importance scores computed. Skipping pruning.")
@@ -171,7 +218,7 @@ class KnowledgeDistiller:
         
         total_pruned = 0
         
-        for name, param in self.student.named_parameters():
+        for name, param in self.student_model.named_parameters():
             if name not in self.knowledge_importance or not param.requires_grad:
                 continue
                 
@@ -189,37 +236,14 @@ class KnowledgeDistiller:
                 param.data *= mask.float()
                 total_pruned += pruned_count
         
-        logger.info(f"Pruned {total_pruned} parameters")
         return total_pruned
-    
-    def get_alpha_schedule(self, iteration: int) -> float:
-        """Get the alpha value based on iteration and schedule.
-        
-        Args:
-            iteration: Current iteration number
-            
-        Returns:
-            Alpha value for balancing distillation and task loss
-        """
-        if self.config.task_weight_schedule == "constant":
-            return self.config.alpha
-        elif self.config.task_weight_schedule == "linear":
-            # Linearly decrease alpha (increase task focus)
-            progress = iteration / self.config.max_iterations
-            return self.config.alpha * (1 - progress)
-        elif self.config.task_weight_schedule == "exponential":
-            # Exponentially decrease alpha
-            progress = iteration / self.config.max_iterations
-            return self.config.alpha * np.exp(-3 * progress)
-        else:
-            return self.config.alpha
     
     def train_step(
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
         optimizer: torch.optim.Optimizer,
-        task_loss_fn: Optional[Callable] = None
+        alpha: float
     ) -> Dict[str, float]:
         """Perform a single training step with distillation.
         
@@ -227,36 +251,31 @@ class KnowledgeDistiller:
             inputs: Input batch
             targets: Target labels
             optimizer: Optimizer for student model
-            task_loss_fn: Custom task loss function (uses CrossEntropy if None)
+            alpha: Weight for distillation loss
             
         Returns:
             Dictionary with loss components
         """
-        self.student.train()
+        self.student_model.train()
         
         inputs = inputs.to(self.device)
         targets = targets.to(self.device)
         
         # Get predictions from both models
         with torch.no_grad():
-            teacher_logits = self.teacher(inputs)
+            teacher_logits = self.teacher_model(inputs)
         
-        student_logits = self.student(inputs)
+        student_logits = self.student_model(inputs)
         
         # Compute losses
-        if task_loss_fn is None:
-            task_loss = F.cross_entropy(student_logits, targets)
-        else:
-            task_loss = task_loss_fn(student_logits, targets)
-        
+        task_loss = F.cross_entropy(student_logits, targets)
         distill_loss = self.distillation_loss(
             student_logits,
             teacher_logits,
             self.config.temperature
         )
         
-        # Combine losses with schedule
-        alpha = self.get_alpha_schedule(self.iteration)
+        # Combine losses
         total_loss = alpha * distill_loss + (1 - alpha) * task_loss
         
         # Backward pass
@@ -264,72 +283,152 @@ class KnowledgeDistiller:
         total_loss.backward()
         optimizer.step()
         
+        # Calculate accuracy
+        _, predicted = student_logits.max(1)
+        correct = predicted.eq(targets).sum().item()
+        accuracy = correct / targets.size(0)
+        
         return {
             "total_loss": total_loss.item(),
             "distill_loss": distill_loss.item(),
             "task_loss": task_loss.item(),
-            "alpha": alpha
+            "alpha": alpha,
+            "accuracy": accuracy
+        }
+    
+    def evaluate(self, dataloader: DataLoader) -> Dict[str, float]:
+        """Evaluate the student model.
+        
+        Args:
+            dataloader: Validation data loader
+            
+        Returns:
+            Dictionary with evaluation metrics
+        """
+        self.student_model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for inputs, targets in dataloader:
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+                
+                outputs = self.student_model(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                
+                total_loss += loss.item() * targets.size(0)
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(targets).sum().item()
+                total += targets.size(0)
+        
+        return {
+            "loss": total_loss / total if total > 0 else 0.0,
+            "accuracy": correct / total if total > 0 else 0.0
         }
     
     def distill(
         self,
-        train_dataloader: torch.utils.data.DataLoader,
-        optimizer: torch.optim.Optimizer,
-        num_epochs: int,
-        prune_every: int = 5,
-        eval_fn: Optional[Callable] = None
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader] = None,
+        verbose: bool = True
     ) -> Dict[str, List[float]]:
         """Run the complete distillation process.
         
         Args:
-            train_dataloader: DataLoader for task-specific training data
-            optimizer: Optimizer for student model
-            num_epochs: Number of training epochs
-            prune_every: Prune every N epochs
-            eval_fn: Optional evaluation function
+            train_loader: DataLoader for task-specific training data
+            val_loader: Optional validation data loader
+            verbose: Whether to print progress
             
         Returns:
             Training history with metrics
         """
+        optimizer = torch.optim.Adam(
+            self.student_model.parameters(), 
+            lr=self.config.learning_rate
+        )
+        
         history = {
             "total_loss": [],
             "distill_loss": [],
             "task_loss": [],
-            "pruned_params": []
+            "train_accuracy": [],
+            "val_accuracy": [],
+            "val_loss": [],
+            "alpha": [],
+            "pruned_params": [],
+            "sparsity": []
         }
         
-        for epoch in range(num_epochs):
-            epoch_losses = {"total_loss": 0, "distill_loss": 0, "task_loss": 0}
+        if verbose:
+            print(f"\n{'='*60}")
+            print("KNOWLEDGE DISTILLATION TRAINING")
+            print(f"{'='*60}")
+        
+        for epoch in range(self.config.num_epochs):
+            self.current_epoch = epoch
+            
+            # Get current alpha
+            alpha = self.get_alpha(epoch)
+            
+            # Training
+            epoch_losses = {"total_loss": 0, "distill_loss": 0, "task_loss": 0, "accuracy": 0}
             num_batches = 0
             
-            for inputs, targets in train_dataloader:
-                losses = self.train_step(inputs, targets, optimizer)
+            self.student_model.train()
+            for inputs, targets in train_loader:
+                losses = self.train_step(inputs, targets, optimizer, alpha)
                 
                 for key in epoch_losses:
-                    epoch_losses[key] += losses[key]
+                    if key in losses:
+                        epoch_losses[key] += losses[key]
                 num_batches += 1
                 self.iteration += 1
             
             # Average losses
             for key in epoch_losses:
-                epoch_losses[key] /= num_batches
-                history[key].append(epoch_losses[key])
+                epoch_losses[key] /= max(1, num_batches)
+            
+            history["total_loss"].append(epoch_losses["total_loss"])
+            history["distill_loss"].append(epoch_losses["distill_loss"])
+            history["task_loss"].append(epoch_losses["task_loss"])
+            history["train_accuracy"].append(epoch_losses["accuracy"])
+            history["alpha"].append(alpha)
+            
+            # Validation
+            if val_loader is not None:
+                val_metrics = self.evaluate(val_loader)
+                history["val_accuracy"].append(val_metrics["accuracy"])
+                history["val_loss"].append(val_metrics["loss"])
             
             # Periodic pruning
-            if (epoch + 1) % prune_every == 0:
-                self.compute_knowledge_importance(train_dataloader, num_batches=10)
-                pruned = self.prune_irrelevant_knowledge()
-                history["pruned_params"].append(pruned)
+            pruned = 0
+            if epoch >= self.config.pruning_start_epoch and epoch <= self.config.pruning_end_epoch:
+                if (epoch - self.config.pruning_start_epoch) % self.config.prune_every == 0:
+                    self.compute_knowledge_importance(train_loader, num_batches=10)
+                    pruning_rate = self.get_pruning_rate(epoch)
+                    pruned = self.prune_irrelevant_knowledge(pruning_rate)
             
-            # Evaluation
-            if eval_fn is not None:
-                eval_metric = eval_fn(self.student)
-                logger.info(f"Epoch {epoch + 1}/{num_epochs} - "
-                          f"Loss: {epoch_losses['total_loss']:.4f} - "
-                          f"Eval: {eval_metric:.4f}")
-            else:
-                logger.info(f"Epoch {epoch + 1}/{num_epochs} - "
-                          f"Loss: {epoch_losses['total_loss']:.4f}")
+            history["pruned_params"].append(pruned)
+            
+            # Compute current sparsity
+            from utils import compute_sparsity
+            sparsity_stats = compute_sparsity(self.student_model)
+            history["sparsity"].append(sparsity_stats["overall_sparsity"])
+            
+            if verbose:
+                val_acc_str = f", Val Acc: {history['val_accuracy'][-1]*100:.2f}%" if val_loader else ""
+                prune_str = f", Pruned: {pruned:,}" if pruned > 0 else ""
+                print(f"Epoch [{epoch+1}/{self.config.num_epochs}] "
+                      f"Loss: {epoch_losses['total_loss']:.4f}, "
+                      f"Train Acc: {epoch_losses['accuracy']*100:.2f}%"
+                      f"{val_acc_str}{prune_str}, α: {alpha:.3f}")
+        
+        if verbose:
+            print(f"{'='*60}")
+            print("DISTILLATION COMPLETE!")
+            print(f"{'='*60}")
         
         return history
 
@@ -337,31 +436,50 @@ class KnowledgeDistiller:
 class SpecializedExpert:
     """Wrapper for a specialized expert model after distillation."""
     
-    def __init__(self, model: nn.Module, task_name: str, metadata: Optional[Dict] = None):
+    def __init__(
+        self, 
+        model: nn.Module, 
+        task_name: str, 
+        config: Optional[DistillationConfig] = None,
+        metadata: Optional[Dict] = None
+    ):
         """Initialize specialized expert.
         
         Args:
             model: The distilled specialized model
             task_name: Name of the specialized task
+            config: Distillation config used (optional)
             metadata: Additional metadata about the expert
         """
         self.model = model
         self.task_name = task_name
+        self.config = config
         self.metadata = metadata or {}
         
-    def predict(self, inputs: torch.Tensor) -> torch.Tensor:
+    def predict(self, inputs: torch.Tensor) -> List[Dict[str, Any]]:
         """Make predictions using the specialized model.
         
         Args:
             inputs: Input tensor
             
         Returns:
-            Model predictions
+            List of prediction dictionaries with class and confidence
         """
         self.model.eval()
         with torch.no_grad():
             outputs = self.model(inputs)
-        return outputs
+            probabilities = F.softmax(outputs, dim=-1)
+            confidences, predictions = probabilities.max(dim=-1)
+        
+        results = []
+        for pred, conf in zip(predictions, confidences):
+            results.append({
+                "predicted_class": pred.item(),
+                "confidence": conf.item() * 100,
+                "probabilities": probabilities[len(results)].cpu().tolist()
+            })
+        
+        return results
     
     def save(self, path: str) -> None:
         """Save the specialized expert model.
@@ -377,18 +495,17 @@ class SpecializedExpert:
         logger.info(f"Saved specialized expert to {path}")
     
     @classmethod
-    def load(cls, path: str, model_class: nn.Module) -> "SpecializedExpert":
+    def load(cls, path: str, model: nn.Module) -> "SpecializedExpert":
         """Load a specialized expert model.
         
         Args:
             path: Path to load the model from
-            model_class: The model class to instantiate
+            model: Model instance to load weights into
             
         Returns:
             Loaded SpecializedExpert instance
         """
         checkpoint = torch.load(path)
-        model = model_class
         model.load_state_dict(checkpoint["model_state_dict"])
         
         return cls(

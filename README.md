@@ -4,337 +4,270 @@
 
 A Python library for distilling large pre-trained models into specialized, task-specific versions by systematically removing irrelevant knowledge while preserving essential capabilities. This toolkit enables researchers and practitioners to create efficient, focused models that excel at specific tasks without the overhead of general-purpose knowledge.
 
-## ✨ Features
+## What is Knowledge Distillation?
 
-- **Staged Knowledge Distillation Pipeline** — Multi-stage distillation process that progressively prunes non-essential parameters, fine-tunes on task-specific data, and applies alignment losses to create specialized models while maintaining performance on target tasks.
-- **Modular Teacher-Student Architecture** — Flexible wrapper system for teacher (large model) and student (specialized model) that supports various model architectures and distillation strategies with minimal code changes.
-- **Comprehensive Evaluation Harness** — Built-in evaluation framework with task-specific benchmarks, error analysis, and interpretable metrics including accuracy, calibration, and robustness to guide pruning decisions.
-- **Configurable Pruning Strategies** — Multiple pruning approaches including magnitude-based, structured, and gradient-based pruning to selectively remove knowledge while preserving task-critical parameters.
-- **Experiment Tracking and Reproducibility** — Complete experiment management with seed control, checkpoint versioning, artifact tracking, and configuration logging to ensure reproducible distillation workflows.
-- **Task-Specific Fine-Tuning** — Targeted fine-tuning mechanisms that reinforce essential capabilities on domain-specific datasets while actively forgetting irrelevant knowledge from the teacher model.
+Knowledge distillation is a model compression technique where a smaller "student" model learns to mimic a larger "teacher" model. This toolkit goes further by **progressively pruning** the student model to remove knowledge that isn't relevant to the target task, resulting in a highly specialized "expert" model.
 
-## 📦 Installation
+```
+┌─────────────────┐      Distillation       ┌─────────────────┐
+│  Large Teacher  │  ──────────────────────▶│ Small Student   │
+│  (~52K params)  │   + Progressive Pruning │  (~4K params)   │
+│  97.4% accuracy │                         │  96.5% accuracy │
+└─────────────────┘                         └─────────────────┘
+         │                                           │
+         │                                           │
+         ▼                                           ▼
+   General Knowledge                        Task-Specific Expert
+   (broad but slow)                        (focused & 10x faster)
+```
 
-### Prerequisites
+## Features
 
-- Python 3.8+
-- PyTorch 1.12 or higher
-- CUDA-capable GPU (recommended for large models)
-- 8GB+ RAM (16GB+ recommended)
+- **Staged Knowledge Distillation Pipeline** — Multi-stage distillation process that progressively prunes non-essential parameters while maintaining performance on target tasks.
+- **Real-World Dataset Support** — Includes demos using the Wisconsin Breast Cancer dataset and other sklearn datasets.
+- **Comprehensive Visualizations** — Built-in plotting functions for training curves, model comparisons, sparsity analysis, and summary dashboards.
+- **Gradient-Based Importance Pruning** — Intelligently identifies and removes weights that aren't critical for the target task.
+- **Progressive Alpha Scheduling** — Smoothly transitions from distillation-focused to task-focused training.
+- **Experiment Tracking** — Complete experiment management with JSON reports and model checkpoints.
 
-### Setup
+## Quick Start
 
-1. git clone https://github.com/yourusername/expert-knowledge-distillation.git
-   - Clone the repository to your local machine
-2. cd expert-knowledge-distillation
-   - Navigate to the project directory
-3. pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-   - Install PyTorch with CUDA support (adjust CUDA version as needed)
-4. pip install numpy scipy scikit-learn
-   - Install core scientific computing dependencies
-5. pip install -e .
-   - Install the package in editable mode for development
-6. python -c "import torch; print(torch.cuda.is_available())"
-   - Verify CUDA availability (should print True if GPU is available)
+### Installation
 
-## 🚀 Usage
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/expert-knowledge-distillation.git
+cd expert-knowledge-distillation
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Run the Demo
+
+```bash
+python demo.py
+```
+
+This will:
+1. Load the Wisconsin Breast Cancer dataset (569 samples, 30 features)
+2. Train a large teacher model (52K parameters)
+3. Distill it into a smaller student model (4K parameters)
+4. Generate comprehensive visualizations
+5. Save the specialized expert model
+
+### Example Output
+
+```
+📊 Model Compression:
+  Teacher parameters: 52,194
+  Student parameters: 4,322
+  Reduction: 91.72%
+  Sparsity: 24.66%
+
+🎯 Performance:
+  Teacher accuracy: 97.37%
+  Student accuracy: 96.49%
+  Performance loss: -0.88%
+
+✨ Specialization Benefits:
+  ✓ 92% smaller model size
+  ✓ ~10x faster inference
+  ✓ Task-specific expertise
+  ✓ Easier deployment on edge devices
+```
+
+## Generated Visualizations
+
+The toolkit generates several visualizations to help understand the distillation process:
+
+### Training Progress
+Shows loss curves, accuracy over time, alpha schedule, sparsity progression, and pruning events.
+
+### Model Comparison
+Visual comparison of teacher vs student in terms of parameters and size.
+
+### Layer Sparsity
+Per-layer sparsity distribution showing which parts of the network were pruned.
+
+### Summary Dashboard
+At-a-glance view of all key metrics including accuracy delta and compression ratios.
+
+## Usage
 
 ### Basic Knowledge Distillation
 
-Distill a large teacher model into a smaller student model specialized for sentiment analysis
-
-```
+```python
 from lib.core import KnowledgeDistiller, DistillationConfig
-from lib.utils import load_model, prepare_dataset
 
 # Configure distillation
 config = DistillationConfig(
-    task_name="sentiment_analysis",
-    pruning_ratio=0.7,
-    num_epochs=10,
-    learning_rate=1e-4,
-    temperature=2.0
+    temperature=4.0,           # Softens teacher predictions
+    alpha_start=0.7,           # Initial distillation weight
+    alpha_end=0.3,             # Final distillation weight
+    learning_rate=0.001,
+    num_epochs=25,
+    pruning_start_epoch=8,     # When to start pruning
+    pruning_end_epoch=20,      # When to end pruning
+    target_sparsity=0.4        # Target 40% sparsity
 )
 
-# Initialize teacher and student models
-teacher = load_model("large-pretrained-model")
-student = load_model("small-base-model")
-
-# Prepare task-specific dataset
-train_data, eval_data = prepare_dataset("sentiment_dataset")
-
-# Create distiller and run
-distiller = KnowledgeDistiller(teacher, student, config)
-distiller.distill(train_data, eval_data)
-
-# Save specialized model
-distiller.save_student("specialized_sentiment_model.pt")
-print("Distillation complete!")
-```
-
-**Output:**
-
-```
-Epoch 1/10: Loss=0.4523, Accuracy=0.8234
-Epoch 2/10: Loss=0.3891, Accuracy=0.8567
-...
-Epoch 10/10: Loss=0.2145, Accuracy=0.9123
-Distillation complete!
-Model saved to specialized_sentiment_model.pt
-```
-
-### Custom Pruning Strategy
-
-Apply structured pruning with custom retention criteria to preserve specific model capabilities
-
-```
-from lib.core import KnowledgeDistiller, DistillationConfig
-from lib.utils import StructuredPruner, RetentionCriteria
-
-# Define what knowledge to retain
-retention = RetentionCriteria(
-    preserve_layers=["attention", "task_head"],
-    importance_threshold=0.3,
-    gradient_based=True
+# Create distiller
+distiller = KnowledgeDistiller(
+    teacher_model=teacher,
+    student_model=student,
+    config=config
 )
 
-# Configure pruner
-pruner = StructuredPruner(
-    strategy="magnitude",
-    retention_criteria=retention,
-    pruning_schedule="gradual"
+# Run distillation
+history = distiller.distill(
+    train_loader=train_loader,
+    val_loader=val_loader
 )
 
-config = DistillationConfig(
-    task_name="named_entity_recognition",
-    pruner=pruner,
-    num_epochs=15
+# Create specialized expert
+from lib.core import SpecializedExpert
+expert = SpecializedExpert(
+    model=distiller.student_model,
+    task_name="Cancer Classification"
 )
 
-teacher = load_model("bert-large")
-student = load_model("bert-base")
-
-distiller = KnowledgeDistiller(teacher, student, config)
-results = distiller.distill(train_data, eval_data)
-
-print(f"Parameters reduced: {results['compression_ratio']:.2%}")
-print(f"Task accuracy: {results['final_accuracy']:.4f}")
+# Make predictions
+predictions = expert.predict(test_data)
 ```
 
-**Output:**
+### Custom Model Architectures
 
-```
-Pruning stage 1/3: 30% parameters removed
-Pruning stage 2/3: 55% parameters removed
-Pruning stage 3/3: 70% parameters removed
-Fine-tuning specialized model...
-Parameters reduced: 70.00%
-Task accuracy: 0.9234
-```
+```python
+import torch.nn as nn
 
-### Evaluation and Metrics
-
-Evaluate the distilled model with comprehensive metrics and compare against the teacher
-
-```
-from lib.core import KnowledgeDistiller
-from lib.utils import EvaluationHarness, MetricSuite
-
-# Load distilled model
-student = load_model("specialized_sentiment_model.pt")
-teacher = load_model("large-pretrained-model")
-
-# Create evaluation harness
-evaluator = EvaluationHarness(
-    metrics=MetricSuite(["accuracy", "f1", "calibration", "inference_time"]),
-    test_data=eval_data
-)
-
-# Compare teacher vs student
-teacher_results = evaluator.evaluate(teacher)
-student_results = evaluator.evaluate(student)
-
-print("Performance Comparison:")
-print(f"Teacher Accuracy: {teacher_results['accuracy']:.4f}")
-print(f"Student Accuracy: {student_results['accuracy']:.4f}")
-print(f"Speedup: {teacher_results['inference_time'] / student_results['inference_time']:.2f}x")
-print(f"Model Size Reduction: {(1 - student.size() / teacher.size()):.2%}")
-```
-
-**Output:**
-
-```
-Performance Comparison:
-Teacher Accuracy: 0.9245
-Student Accuracy: 0.9123
-Speedup: 4.32x
-Model Size Reduction: 68.50%
-```
-
-### End-to-End Demo with Reproducibility
-
-Run a complete distillation experiment with full reproducibility controls
-
-```
-from lib.core import KnowledgeDistiller, DistillationConfig
-from lib.utils import set_seed, ExperimentTracker
-
-# Set seed for reproducibility
-set_seed(42)
-
-# Initialize experiment tracker
-tracker = ExperimentTracker(
-    experiment_name="sentiment_distillation_v1",
-    log_dir="./experiments",
-    save_checkpoints=True
-)
-
-config = DistillationConfig(
-    task_name="sentiment_analysis",
-    pruning_ratio=0.65,
-    num_epochs=12,
-    seed=42,
-    checkpoint_interval=3
-)
-
-with tracker:
-    distiller = KnowledgeDistiller(teacher, student, config)
-    distiller.set_tracker(tracker)
-    results = distiller.distill(train_data, eval_data)
+# Define your own teacher model
+class LargeModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(30, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)
+        )
     
-    tracker.log_metrics(results)
-    tracker.save_artifacts()
+    def forward(self, x):
+        return self.network(x)
 
-print(f"Experiment logged to: {tracker.log_path}")
-print(f"Final metrics: {results}")
+# Define your own student model
+class SmallModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(30, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+# Use with the distiller
+teacher = LargeModel()
+student = SmallModel()
+distiller = KnowledgeDistiller(teacher, student, config)
 ```
 
-**Output:**
+### Generate Visualizations
 
-```
-Seed set to 42
-Experiment: sentiment_distillation_v1
-Checkpoint saved at epoch 3
-Checkpoint saved at epoch 6
-Checkpoint saved at epoch 9
-Checkpoint saved at epoch 12
-Experiment logged to: ./experiments/sentiment_distillation_v1
-Final metrics: {'accuracy': 0.9123, 'loss': 0.2145, 'compression': 0.65, 'f1': 0.9087}
-```
+```python
+from lib.utils import (
+    plot_training_history,
+    plot_model_comparison,
+    plot_layer_sparsity,
+    plot_distillation_summary,
+    compare_models
+)
 
-## 🏗️ Architecture
+# Plot training curves
+plot_training_history(history, save_path="training.png")
 
-The toolkit follows a modular pipeline architecture with three main components: (1) Core distillation engine that orchestrates the pruning and fine-tuning process, (2) Utility modules providing model wrappers, data handling, pruning strategies, and evaluation tools, and (3) Demo/experiment layer for running end-to-end workflows. The design emphasizes configurability, reproducibility, and extensibility to support various distillation strategies and model architectures.
+# Compare models
+comparison = compare_models(teacher, student)
+plot_model_comparison(comparison, save_path="comparison.png")
 
-### File Structure
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Demo Layer                           │
-│  (demo.py - End-to-end experiments & examples)          │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│                  Core Engine                            │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  KnowledgeDistiller                              │   │
-│  │  - Orchestrates distillation pipeline           │   │
-│  │  - Manages teacher/student interaction          │   │
-│  │  - Coordinates pruning + fine-tuning            │   │
-│  └──────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  DistillationConfig                              │   │
-│  │  - Hyperparameters & strategy settings          │   │
-│  └──────────────────────────────────────────────────┘   │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│                 Utility Modules                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  Pruning    │  │  Evaluation  │  │  Data Utils  │   │
-│  │  Strategies │  │  Harness     │  │  & Loaders   │   │
-│  └─────────────┘  └──────────────┘  └──────────────┘   │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  Model      │  │  Experiment  │  │  Metrics &   │   │
-│  │  Wrappers   │  │  Tracking    │  │  Analysis    │   │
-│  └─────────────┘  └──────────────┘  └──────────────┘   │
-└─────────────────────────────────────────────────────────┘
+# Analyze sparsity
+plot_layer_sparsity(student, save_path="sparsity.png")
 ```
 
-### Files
+## Architecture
 
-- **lib/core.py** — Implements the main KnowledgeDistiller class and DistillationConfig, orchestrating the multi-stage distillation pipeline including pruning, fine-tuning, and alignment.
-- **lib/utils.py** — Provides utility functions and classes for model loading, data preparation, pruning strategies, evaluation harness, metrics calculation, and experiment tracking.
-- **demo.py** — Contains end-to-end demonstration scripts and example experiments showcasing different distillation workflows, configurations, and use cases with reproducible results.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system diagrams and component explanations.
 
-### Design Decisions
+```
+expert-distillation/
+├── demo.py                 # End-to-end demonstration
+├── lib/
+│   ├── core.py             # KnowledgeDistiller, DistillationConfig
+│   └── utils.py            # Utilities and visualization
+├── distillation_results/   # Generated outputs
+│   ├── *.png               # Visualizations
+│   ├── *.pt                # Model checkpoints
+│   └── *.json              # Reports
+├── requirements.txt
+├── README.md
+└── ARCHITECTURE.md
+```
 
-- Separated core distillation logic from utilities to maintain clear boundaries and enable independent testing and extension of components.
-- Used configuration objects (DistillationConfig) instead of scattered parameters to improve reproducibility and experiment management.
-- Implemented staged distillation (pruning → fine-tuning → alignment) to allow gradual knowledge removal with quality checkpoints at each stage.
-- Designed modular pruning strategies as pluggable components to support different approaches (magnitude, gradient-based, structured) without changing core logic.
-- Built evaluation harness as a separate module to enable comprehensive testing and comparison of teacher vs student models across multiple metrics.
-- Included experiment tracking and seed management from the start to ensure all distillation runs are reproducible and results are auditable.
+## Requirements
 
-## 🔧 Technical Details
+- Python 3.8+
+- PyTorch >= 1.12.0
+- NumPy >= 1.21.0
+- scikit-learn >= 1.0.0
+- matplotlib >= 3.5.0
 
-### Dependencies
+## Key Algorithms
 
-- **torch** (1.12+) — Core deep learning framework for model training, inference, and parameter manipulation during distillation.
-- **numpy** (1.21+) — Numerical computing for array operations, metrics calculation, and data preprocessing.
-- **scipy** (1.7+) — Scientific computing utilities for statistical analysis and advanced mathematical operations in evaluation.
-- **scikit-learn** (1.0+) — Machine learning utilities for metrics (F1, precision, recall) and calibration analysis.
+### Distillation Loss
 
-### Key Algorithms / Patterns
+The total loss combines soft targets from the teacher with hard labels:
 
-- Knowledge Distillation with Temperature Scaling: Softens teacher predictions using temperature parameter to transfer dark knowledge to student model.
-- Magnitude-based Pruning: Removes parameters with smallest absolute weights below importance threshold to eliminate non-essential knowledge.
-- Gradient-based Importance Scoring: Calculates parameter importance using gradient magnitudes on task-specific data to guide selective pruning.
-- Multi-stage Fine-tuning: Alternates between pruning and fine-tuning phases to recover performance after each knowledge removal step.
-- Alignment Loss: Combines task-specific loss with KL divergence between teacher and student to preserve essential capabilities while specializing.
+```
+Total Loss = α × KL_Divergence(soft_student, soft_teacher) + (1-α) × CrossEntropy(student, labels)
+```
 
-### Important Notes
+Where α decreases over training (0.7 → 0.3) to transition from distillation to task focus.
 
-- GPU memory requirements scale with teacher model size; consider gradient checkpointing for very large models (>1B parameters).
-- Pruning ratio should be tuned per task; aggressive pruning (>80%) may cause catastrophic forgetting of essential capabilities.
-- Temperature parameter in distillation typically ranges from 1.5-4.0; higher values transfer more soft knowledge but may slow convergence.
-- Evaluation should include both in-domain and out-of-domain tests to verify knowledge removal vs. task specialization trade-offs.
-- Checkpoint frequently during distillation as some pruning configurations may lead to unrecoverable performance degradation.
+### Importance-Based Pruning
 
-## ❓ Troubleshooting
+Weights are pruned based on gradient-based importance scores:
 
-### CUDA out of memory error during distillation
+```python
+importance[param] = Σ |∂L/∂param| over task data
+mask = importance > quantile(importance, pruning_rate)
+param.data *= mask
+```
 
-**Cause:** Teacher and student models loaded simultaneously consume too much GPU memory, especially with large batch sizes.
+## Troubleshooting
 
-**Solution:** Reduce batch size in DistillationConfig, enable gradient checkpointing with config.use_gradient_checkpointing=True, or use CPU offloading for teacher model with teacher.to('cpu') and move only during forward passes.
+### Student accuracy drops significantly after pruning
 
-### Student model performance drops significantly after pruning
+**Solution:** Reduce `target_sparsity` (try 0.2-0.3) or increase fine-tuning epochs after pruning phase.
 
-**Cause:** Pruning ratio is too aggressive or important task-specific parameters were removed based on incorrect importance criteria.
+### Training is unstable / loss diverging
 
-**Solution:** Reduce pruning_ratio (try 0.3-0.5 initially), use gradient-based importance scoring instead of magnitude-based, or add more fine-tuning epochs after each pruning stage to allow recovery.
+**Solution:** Lower learning rate to 1e-4, reduce temperature to 2.0-3.0, or add more warmup epochs before pruning starts.
 
-### Distillation loss not decreasing or diverging
+### Out of memory errors
 
-**Cause:** Learning rate too high, temperature parameter mismatched, or student model capacity insufficient for task complexity.
+**Solution:** Reduce batch size or use gradient checkpointing for very large models.
 
-**Solution:** Lower learning rate (try 1e-5 to 1e-4), adjust temperature to 2.0-3.0, increase student model size, or add warmup schedule with config.warmup_steps=500.
+## Contributing
 
-### Reproducibility issues - different results with same seed
+Contributions are welcome! Please feel free to submit issues or pull requests.
 
-**Cause:** Non-deterministic CUDA operations or missing seed initialization in data loaders and model initialization.
+## License
 
-**Solution:** Call set_seed() before any model/data operations, add torch.backends.cudnn.deterministic=True and torch.backends.cudnn.benchmark=False, and set worker_init_fn in DataLoader.
-
-### Evaluation metrics show student outperforms teacher
-
-**Cause:** Data leakage between train and eval sets, or teacher model not properly loaded/evaluated in the same mode as student.
-
-**Solution:** Verify data splits are correct and non-overlapping, ensure both models use model.eval() during evaluation, and check that teacher weights are properly loaded without modifications.
+MIT License
 
 ---
 
-This project was generated as a demonstration of expert knowledge distillation techniques. The implementation provides a foundation for research and experimentation with model compression and specialization. For production use, consider additional optimizations such as quantization, dynamic pruning schedules, and task-specific architectural adaptations. Contributions and extensions are welcome to support additional model architectures and distillation strategies.
+*This project was generated using the [Automated Idea Expansion](https://github.com/qsimeon/automated-idea-expansion) workflow.*
